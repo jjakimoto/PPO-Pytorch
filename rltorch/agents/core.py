@@ -95,9 +95,10 @@ class ACAgent(BaseAgent):
     value_loss_coef: float
     max_grad_nrom: float
     """
+
     def __init__(self, state_shape, action_config, processor,
                  reward_reshape, smooth_length, log_dir,
-                 window_length, lr, critic_config, actor_config,
+                 window_length, lr, model_config,
                  action_dist, discount, gae_lambda, num_frames_per_proc,
                  batch_size,
                  entropy_coef, value_loss_coef, max_grad_norm):
@@ -116,11 +117,9 @@ class ACAgent(BaseAgent):
         # Multi Agent Memory
         self.memory = ACMemory(num_frames_per_proc, window_length)
         # Build Network
-        self.actor = self.build_actor(actor_config)
-        self.critic = self.build_critic(critic_config)
+        self.ac_model = self.build_model(model_config)
         # Build optimizer
-        self.parameters = chain(self.critic.parameters(),
-                                self.actor.parameters())
+        self.parameters = self.ac_model.parameters()
         self.optimizer = optim.Adam(self.parameters, lr=lr)
         # Set device
         self.device = torch.device(
@@ -130,15 +129,14 @@ class ACAgent(BaseAgent):
         mydeque = partial(deque, maxlen=self.smooth_length)
         self.reward_record = defaultdict(mydeque)
         self.loss_record = deque(maxlen=self.smooth_length)
+        self.actor_loss_record = deque(maxlen=self.smooth_length)
+        self.critic_loss_record = deque(maxlen=self.smooth_length)
+        self.entropy_record = deque(maxlen=self.smooth_length)
         self.ep_rewards = defaultdict(list)
         self.ep_actions = defaultdict(list)
 
     @abstractmethod
-    def build_critic(self, config):
-        raise NotImplementedError
-
-    @abstractmethod
-    def build_actor(self, config):
+    def build_model(self, config):
         raise NotImplementedError
 
     def _calc_dim(self, model):
@@ -152,10 +150,9 @@ class ACAgent(BaseAgent):
         state = self.memory.get_recent_state(obs)
         state_tensor = torch.tensor(state, dtype=torch.float,
                                     device=self.device)
-        dist = self.action_dist(self.actor(state_tensor))
+        dist, value = self.ac_model(state_tensor)
         action = dist.sample()
         if training:
-            value = self.critic(state_tensor)
             log_prob = dist.log_prob(action)
             entropy = dist.entropy()
             self.memory.store_value_log_prob(value, log_prob, entropy)
@@ -231,7 +228,7 @@ class ACAgent(BaseAgent):
         new_state = torch.tensor(self.get_newest_state(),
                                  dtype=torch.float,
                                  device=self.device)
-        new_value = self.critic(new_state).sum(-1)
+        new_value = self.ac_model(new_state)[1].sum(-1)
         new_target = (rewards[-1] + new_value * masks[-1]).detach()
         new_delta = new_target - values[-1]
         deltas.append(new_delta)
