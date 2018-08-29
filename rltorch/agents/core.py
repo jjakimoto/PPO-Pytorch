@@ -177,11 +177,11 @@ class ACAgent(BaseAgent):
 
                 self.writer.add_histogram(f'data/episode_action_{i}',
                                           np.array(self.ep_actions[i]),
-                                          self.episode_steps[i], bins='auto')
+                                          self.episode_steps[i])
 
                 self.writer.add_histogram(f'data/episode_reward_dist_{i}',
                                           np.array(self.ep_rewards[i]),
-                                          self.episode_steps[i], bins='auto')
+                                          self.episode_steps[i])
 
                 # Reset record
                 self.episode_steps[i] += 1
