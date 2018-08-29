@@ -8,7 +8,7 @@ from rltorch.processors import AtariProcessor
 
 if __name__ == "__main__":
     if len(sys.argv) > 1:
-        num_workers = sys.argv[1]
+        num_workers = int(sys.argv[1])
     else:
         num_workers = 4
     env = gym.make('Breakout-v0').unwrapped
@@ -26,4 +26,4 @@ if __name__ == "__main__":
                      num_frames_per_proc=128)
 
     runner = Runner(env, agent, num_workers=num_workers, multi=True)
-    optimzeid_agent = runner.simulate(training=True, notebook=True, render_freq=0)
+    optimzeid_agent = runner.simulate(training=True, notebook=False, render_freq=0)
