@@ -37,6 +37,8 @@ class PPOAgent(ACAgent):
     def fit(self, *args, **kwargs):
         if self.memory.nb_states < self.num_frames_per_proc:
             return
+        # Switch devices for optimization
+        self.ac_model.to(self.device)
         advs, log_probs, entropies = self.aggregate_experiences()
         T = advs.size(0)
         for epoch in range(self.n_epochs):
@@ -87,6 +89,7 @@ class PPOAgent(ACAgent):
             self.writer.add_scalar(f'data/reward_{key}',
                                    np.mean(self.reward_record[key]),
                                    self.record_step)
+        self.ac_model.to(self.experience_device)
 
     def build_model(self, config=None):
         # Share layer

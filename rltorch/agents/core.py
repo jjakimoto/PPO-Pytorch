@@ -134,6 +134,7 @@ class ACAgent(BaseAgent):
         self.entropy_record = deque(maxlen=self.smooth_length)
         self.ep_rewards = defaultdict(list)
         self.ep_actions = defaultdict(list)
+        self.experience_device = "cpu"
 
     @abstractmethod
     def build_model(self, config):
@@ -149,7 +150,7 @@ class ACAgent(BaseAgent):
             obs = [self.processor.process(obs_i) for obs_i in obs]
         state = self.memory.get_recent_state(obs)
         state_tensor = torch.tensor(state, dtype=torch.float,
-                                    device=self.device)
+                                    device=self.experience_device)
         dist, value = self.ac_model(state_tensor)
         action = dist.sample()
         if training:
@@ -224,7 +225,7 @@ class ACAgent(BaseAgent):
             target = (rewards[t] + values[t + 1] * masks[t]).detach()
             delta = target - values[t]
             deltas.append(delta)
-        # Estaimte with the newest value
+        # Estimate with the newest value
         new_state = torch.tensor(self.get_newest_state(),
                                  dtype=torch.float,
                                  device=self.device)
