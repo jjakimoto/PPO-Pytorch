@@ -7,6 +7,11 @@ class Flatten(nn.Module):
         return x
 
 
+class Identity(nn.Module):
+    def forward(self, x):
+        return x
+
+
 class ACModel(nn.Module):
     def __init__(self, share_model, actor_model, value_model, action_dist=None):
         super(ACModel, self).__init__()

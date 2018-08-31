@@ -14,6 +14,6 @@ class AtariProcessor(BaseProcessor):
     def process(self, observation):
         if self.last_observation is not None:
             observation = np.maximum(observation, self.last_observation)
-        observation = np.uint8(resize(rgb2gray(observation),
-                                      (self.frame_width, self.frame_height)))
+        observation = resize(rgb2gray(observation),
+                                      (self.frame_width, self.frame_height))
         return observation.reshape((1, self.frame_width, self.frame_height))

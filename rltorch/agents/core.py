@@ -2,8 +2,7 @@ from abc import ABC, abstractmethod
 import os
 import shutil
 from abc import abstractmethod
-from itertools import chain
-from collections import defaultdict, deque
+from collections import defaultdict, deque, namedtuple
 from functools import partial
 
 import numpy as np
@@ -12,6 +11,11 @@ import torch
 import torch.optim as optim
 
 from ..memories import ACMemory
+from ..utils import flatten_batch
+
+
+SampleExperience = namedtuple('SampleExperience',
+                              'state, target, advantage, log_prob, action')
 
 
 class BaseAgent(ABC):
@@ -33,7 +37,7 @@ class BaseAgent(ABC):
         Directory to store the recrod for tensorboard
     """
     def __init__(self, state_shape, action_config, processor=None, reward_reshape=None,
-                 smooth_length=100, log_dir='./logs'):
+                 smooth_length=100, log_dir='./logs', debug=False):
         super(BaseAgent, self).__init__()
         self.state_shape = state_shape
         self.action_config = action_config
@@ -47,6 +51,26 @@ class BaseAgent(ABC):
         self.writer = SummaryWriter(log_dir)
         self.record_step = 0
         self.episode_step = 0
+        self.debug = debug
+
+    def is_same_model(self, model1, model2):
+        from torch_utils.debug import is_same_model
+        res = is_same_model(model1, model2)
+        print(f"Models are the same?: {res}")
+        return res
+
+    def is_updated_model(self, model, old_model):
+        from torch_utils.debug import is_updated_model
+        res = is_updated_model(model, old_model)
+        print(f"Model is updated?: {res}")
+        return res
+
+    def is_updated_model_with_names(self, model, old_model):
+        from torch_utils.debug import is_updated_model_with_names
+        res = is_updated_model_with_names(model, old_model)
+        print(f"Model is updated?: {res}")
+        return res
+
 
     @abstractmethod
     def predict(self, *args, **kwrags):
@@ -65,7 +89,7 @@ class BaseAgent(ABC):
 class ACAgent(BaseAgent):
     """Actor Critic Base Agent
 
-    sParameters
+    Parameters
     ----------
     env: gym.Env
         OpenAI Gym Environment
@@ -93,7 +117,7 @@ class ACAgent(BaseAgent):
     batch_size: int
     entropy_coef: float
     value_loss_coef: float
-    max_grad_nrom: float
+    max_grad_norm: float
     """
 
     def __init__(self, state_shape, action_config, processor,
@@ -101,10 +125,10 @@ class ACAgent(BaseAgent):
                  window_length, lr, model_config,
                  action_dist, discount, gae_lambda, num_frames_per_proc,
                  batch_size,
-                 entropy_coef, value_loss_coef, max_grad_norm):
+                 entropy_coef, value_loss_coef, max_grad_norm, **kwargs):
         super(ACAgent, self).__init__(state_shape, action_config, processor,
                                       reward_reshape,
-                                      smooth_length, log_dir)
+                                      smooth_length, log_dir, **kwargs)
         self.widow_length = window_length
         self.action_dist = action_dist
         self.discount = discount
@@ -119,8 +143,7 @@ class ACAgent(BaseAgent):
         # Build Network
         self.ac_model = self.build_model(model_config)
         # Build optimizer
-        self.parameters = self.ac_model.parameters()
-        self.optimizer = optim.Adam(self.parameters, lr=lr)
+        self.optimizer = optim.Adam(self.ac_model.parameters(), lr=lr)
         # Set device
         self.device = torch.device(
             'cuda' if torch.cuda.is_available() else 'cpu')
@@ -149,14 +172,14 @@ class ACAgent(BaseAgent):
         if self.processor is not None:
             obs = [self.processor.process(obs_i) for obs_i in obs]
         state = self.memory.get_recent_state(obs)
-        state_tensor = torch.tensor(state, dtype=torch.float,
-                                    device=self.experience_device)
-        dist, value = self.ac_model(state_tensor)
-        action = dist.sample()
+        with torch.no_grad():
+            state_tensor = torch.tensor(state, dtype=torch.float,
+                                        device=self.experience_device)
+            dist, value = self.ac_model(state_tensor)
+            action = dist.sample()
         if training:
             log_prob = dist.log_prob(action)
-            entropy = dist.entropy()
-            self.memory.store_value_log_prob(value, log_prob, entropy)
+            self.memory.store_value_log_prob(value, log_prob)
         return action.cpu().numpy()
 
     def observe(self, obs, action, reward, terminal, info, training=True):
@@ -200,6 +223,9 @@ class ACAgent(BaseAgent):
 
     def aggregate_experiences(self):
         experiences = self.memory.sample()
+        states = torch.tensor(np.array(experiences.state),
+                              dtype=torch.float,
+                              device=self.device)
         rewards = torch.tensor(np.array(experiences.reward),
                                dtype=torch.float,
                                device=self.device)
@@ -213,25 +239,28 @@ class ACAgent(BaseAgent):
         log_probs = torch.tensor(torch.stack(experiences.log_prob),
                                  dtype=torch.float,
                                  device=self.device)
-
-        entropies = torch.tensor(torch.stack(experiences.entropy),
-                                 dtype=torch.float,
-                                 device=self.device)
+        actions = torch.stack([torch.tensor(a, dtype=torch.long) for a in experiences.action])
+        actions = actions.to(self.device)
 
         T = len(rewards)
         # Get delta
+        target_values = []
         deltas = []
         for t in range(T - 1):
-            target = (rewards[t] + values[t + 1] * masks[t]).detach()
+            target = rewards[t] + values[t + 1] * masks[t]
+            target_values.append(target)
             delta = target - values[t]
             deltas.append(delta)
         # Estimate with the newest value
-        new_state = torch.tensor(self.get_newest_state(),
-                                 dtype=torch.float,
-                                 device=self.device)
-        new_value = self.ac_model(new_state)[1].sum(-1)
-        new_target = (rewards[-1] + new_value * masks[-1]).detach()
-        new_delta = new_target - values[-1]
+        with torch.no_grad():
+            new_state = torch.tensor(self.get_newest_state(),
+                                     dtype=torch.float,
+                                     device=self.device)
+            new_dist, new_value = self.ac_model(new_state)
+            new_value = new_value.sum(-1)
+            new_target = rewards[-1] + values[-1] * masks[-1]
+            target_values.append(new_target)
+            new_delta = new_target - new_value
         deltas.append(new_delta)
 
         # Calculate advantage from deltas
@@ -245,5 +274,15 @@ class ACAgent(BaseAgent):
                 power += 1.
             advs.append(adv)
         advs = torch.stack(advs)
+        target_values = torch.stack(target_values)
         self.memory.reset()
-        return advs, log_probs, entropies
+        advs = flatten_batch(advs)
+        states = flatten_batch(states)
+        target_values = flatten_batch(target_values)
+        log_probs = flatten_batch(log_probs)
+        actions = flatten_batch(actions)
+        return SampleExperience(state=states,
+                                target=target_values,
+                                advantage=advs,
+                                log_prob=log_probs,
+                                action=actions)

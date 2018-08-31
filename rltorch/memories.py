@@ -12,7 +12,7 @@ Experience = namedtuple('Experience',
                         'state0, action, reward, state1, terminal1')
 
 ACExperience = namedtuple('ACExperience',
-                          'action, reward, terminal, value, log_prob, entropy')
+                          'state, action, reward, terminal, value, log_prob')
 
 
 def sample_batch_indexes(low, high, size):
@@ -362,19 +362,43 @@ class ACMemory(SequentialMemory):
         state = np.concatenate(state, 0)
         return state
 
-    def store_value_log_prob(self, value, log_prob, entropy):
+    def get_state_idx(self, idx):
+        state_list = []
+        n_workers = len(self.observations[0])
+        for worker_idx in range(n_workers):
+            state = self._get_state_idx(idx, worker_idx)
+            state_list.append(state)
+        return np.stack(state_list)
+
+    def _get_state_idx(self, idx, worker_idx):
+        state = []
+        for offset in range(0, self.window_length):
+            current_idx = idx - offset
+            state.insert(0, self.observations[current_idx][worker_idx])
+            if current_idx >= 0:
+                current_terminal = self.terminals[current_idx][worker_idx]
+            else:
+                break
+            if not self.ignore_episode_boundaries and current_terminal:
+                break
+        while len(state) < self.window_length:
+            state.insert(0, zeroed_observation(self.observations[0][0]))
+        state = np.concatenate(state, 0)
+        return state
+
+    def store_value_log_prob(self, value, log_prob):
         self.values.append(value)
         self.log_probs.append(log_prob)
-        self.entropies.append(entropy)
 
     def sample(self):
-        return ACExperience(action=self.actions[-self.num_frames_per_proc:],
+        states_idx = np.arange(len(self.actions))[-self.num_frames_per_proc:]
+        states = [self.get_state_idx(i) for i in states_idx]
+        return ACExperience(state=states,
+                            action=self.actions[-self.num_frames_per_proc:],
                             reward=self.rewards[-self.num_frames_per_proc:],
                             terminal=self.terminals[-self.num_frames_per_proc:],
                             value=self.values[-self.num_frames_per_proc:],
-                            log_prob=self.log_probs[-self.num_frames_per_proc:],
-                            entropy=self.entropies[-self.num_frames_per_proc:])
-
+                            log_prob=self.log_probs[-self.num_frames_per_proc:])
 
     def reset(self):
         self.actions = list()
@@ -383,7 +407,6 @@ class ACMemory(SequentialMemory):
         self.observations = list()
         self.values = list()
         self.log_probs = list()
-        self.entropies = list()
 
     def get_config(self):
         """Return configurations of ACMemory

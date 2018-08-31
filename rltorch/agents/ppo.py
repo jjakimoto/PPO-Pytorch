@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 import torch
 import torch.nn as nn
 import torch.distributions as dist
@@ -21,7 +23,7 @@ class PPOAgent(ACAgent):
                  action_dist=dist.Categorical, discount=0.99, gae_lambda=0.95,
                  num_frames_per_proc=32, batch_size=32, entropy_coef=0.01,
                  value_loss_coef=0.2,
-                 max_grad_norm=None, clip_eps=0.2, n_epochs=4):
+                 max_grad_norm=None, clip_eps=0.2, n_epochs=4, **kwargs):
 
         super(PPOAgent, self).__init__(state_shape, action_config, processor,
                                        reward_reshape, smooth_length, log_dir,
@@ -30,53 +32,57 @@ class PPOAgent(ACAgent):
                                        gae_lambda, num_frames_per_proc,
                                        batch_size,
                                        entropy_coef, value_loss_coef,
-                                       max_grad_norm)
+                                       max_grad_norm, **kwargs)
         self.clip_eps = clip_eps
         self.n_epochs = n_epochs
 
     def fit(self, *args, **kwargs):
         if self.memory.nb_states < self.num_frames_per_proc:
             return
+        if self.debug:
+            old_model = deepcopy(self.ac_model)
         # Switch devices for optimization
         self.ac_model.to(self.device)
-        advs, log_probs, entropies = self.aggregate_experiences()
-        T = advs.size(0)
+        experience = self.aggregate_experiences()
+        T = experience.advantage.size(0)
         for epoch in range(self.n_epochs):
             for idx in range(T // self.batch_size):
                 t_st = idx * self.batch_size
                 t_end = (idx + 1) * self.batch_size
-                batch_advs = advs[t_st:t_end].view(-1)
-                batch_log_probs = log_probs[t_st:t_end].view(-1)
-                batch_entropies = entropies[t_st:t_end].view(-1)
+                fix_advs = experience.advantage[t_st:t_end]
+                fix_log_probs = experience.log_prob[t_st:t_end]
+                batch_states = experience.state[t_st:t_end]
+                batch_actions = experience.action[t_st:t_end]
+                batch_targets = experience.target[t_st:t_end]
                 # Actor Training
-                old_log_probs = batch_log_probs.detach()
-                ratio = torch.exp(batch_log_probs - old_log_probs)
+                dists, values = self.ac_model(batch_states)
+                log_probs = dists.log_prob(batch_actions)
+                ratio = torch.exp(log_probs - fix_log_probs)
                 # Use advantage as constanats when optimizing the policy
-                advs_const = batch_advs.detach()
-                surr1 = ratio * advs_const
+                surr1 = ratio * fix_advs
                 surr2 = torch.clamp(ratio, 1.0 - self.clip_eps,
-                                    1.0 + self.clip_eps) * advs_const
+                                    1.0 + self.clip_eps) * fix_advs
                 actor_loss = -torch.min(surr1, surr2).mean()
                 # Critic Training
-                batch_critic_loss = (batch_advs ** 2).mean()
+                critic_loss = ((batch_targets - values) ** 2).mean()
                 # Entropy regularization
-                batch_entropy = batch_entropies.mean()
+                entropy = dists.entropy().mean()
                 # Total Loss
                 loss = actor_loss \
-                        + self.value_loss_coef * batch_critic_loss \
-                        - self.entropy_coef * batch_entropy
+                        + self.value_loss_coef * critic_loss \
+                        - self.entropy_coef * entropy
                 # Optimizer Model
                 self.optimizer.zero_grad()
                 # Need to keep intermediate results for multiple loops
-                loss.backward(retain_graph=True)
+                loss.backward()
                 # Clip Gradient
                 if self.max_grad_norm is not None:
                     nn.utils.clip_grad_norm(self.parameters, self.max_grad_norm)
                 self.optimizer.step()
                 self.loss_record.append(loss.item())
                 self.actor_loss_record.append(actor_loss.item())
-                self.critic_loss_record.append(batch_critic_loss.item())
-                self.entropy_record.append(batch_entropy.item())
+                self.critic_loss_record.append(critic_loss.item())
+                self.entropy_record.append(entropy.item())
         self.writer.add_scalar(f'data/loss', np.mean(self.loss_record),
                                self.record_step)
         self.writer.add_scalar(f'data/actor_loss', np.mean(self.actor_loss_record),
@@ -90,6 +96,8 @@ class PPOAgent(ACAgent):
                                    np.mean(self.reward_record[key]),
                                    self.record_step)
         self.ac_model.to(self.experience_device)
+        if self.debug:
+            self.is_updated_model_with_names(self.ac_model, old_model)
 
     def build_model(self, config=None):
         # Share layer
@@ -104,6 +112,7 @@ class PPOAgent(ACAgent):
         model.add_module('flatten', Flatten())
         # Calculate dimension after passing test data
         dim = self._calc_dim(model)
+        # dim = 32 * 7 * 7
         # Fully connected layers
         model.add_module('fc1', nn.Linear(dim, 512))
         model.add_module('relu4', nn.ReLU())
@@ -111,7 +120,7 @@ class PPOAgent(ACAgent):
         # Actor layer
         actor_model = nn.Sequential()
         actor_model.add_module('actor_fc', nn.Linear(512, self.action_config['n_action']))
-        actor_model.add_module('softmax', nn.Softmax())
+        actor_model.add_module('actor_softmax', nn.Softmax())
 
         # Value layer
         value_model = nn.Sequential()
